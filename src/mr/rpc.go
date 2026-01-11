@@ -24,6 +24,28 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 
+// AssignTask 相关
+type AssignTaskArgs struct {
+
+}
+
+type AssignTaskReply struct {
+	Tasktype TaskType
+	Taskid int
+	Filename string
+	NReduce int
+	NMap int
+}
+
+type ReportTaskDoneArgs struct {
+	Tasktype TaskType
+	Taskid int
+	// filename string
+}
+
+type ReportTaskDoneReply struct {
+	
+}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the master.
