@@ -46,6 +46,14 @@ type ApplyMsg struct {
 //
 // A Go object implementing a single Raft peer.
 //
+
+type ServerState int
+const (
+	Follower ServerState = iota
+	Candidate
+	Leader 
+)
+
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
@@ -57,6 +65,20 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	// persist state
+	currentTerm int  // 服务器见过最大的任期号
+	votedFor int  // 在currentTerm中投给了谁
+	log []map[int]interface{}  // 
+
+	// volatile state
+	commitIndex int  // 已经被多数确认的最大日志索引
+	lastApplied int  // 应用到状态机的最大索引
+
+	// volatile state in leaders
+	nextIndex []int  // 对每个follower下一个要发送的日志索引
+	matchIndex []int  // 每个follower已经复制到的最大日志索引
+
+	state ServerState
 }
 
 // return currentTerm and whether this server
@@ -66,6 +88,8 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	term = rf.currentTerm
+	isleader = (rf.state == Leader)
 	return term, isleader
 }
 
@@ -117,6 +141,10 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	Term         int // 候选人的任期号
+	CandidateId  int // 请求投票的候选人 ID
+	LastLogIndex int // 候选人最后一条日志的索引
+	LastLogTerm  int // 候选人最后一条日志的任期
 }
 
 //
@@ -125,6 +153,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	Term        int  // 当前服务器的任期号，用于候选人更新自己
+	VoteGranted bool // 是否同意给该候选人投票
 }
 
 //
