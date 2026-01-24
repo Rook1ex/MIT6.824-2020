@@ -54,6 +54,14 @@ const (
 	Leader 
 )
 
+const NoneVotedFor int = -1  // 表示未投票
+
+// 日志条目
+type LogEntry struct {
+	Term int  // 该日志条目被 leader 创建时的任期号
+	Command interface{}  // 客户端提交的命令（Raft只负责复制，不关心内容）
+}
+
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
@@ -68,7 +76,7 @@ type Raft struct {
 	// persist state
 	currentTerm int  // 服务器见过最大的任期号
 	votedFor int  // 在currentTerm中投给了谁
-	log []map[int]interface{}  // 
+	log []LogEntry  // 日志
 
 	// volatile state
 	commitIndex int  // 已经被多数确认的最大日志索引
@@ -81,6 +89,23 @@ type Raft struct {
 	state ServerState
 }
 
+// return log is-up-to-date
+
+func (rf *Raft) isUpToDate(LastLogIndex int, LastLogTerm int) bool {
+	currentlastlogindex := len(rf.log) - 1
+	currentlastlogterm := rf.log[currentlastlogindex].Term
+
+	if (currentlastlogterm < LastLogTerm) || (currentlastlogterm == LastLogTerm && currentlastlogindex <= LastLogIndex) {
+		return true
+	}
+
+	return false
+}
+
+// 重置选举时间函数
+func (rf *Raft) resetSelectTimeout() {
+	
+}
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -162,6 +187,34 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock() 
+	if rf.currentTerm > args.Term {
+		reply.VoteGranted = false
+		reply.Term = rf.currentTerm
+		return 
+	}
+	
+	if rf.currentTerm < args.Term {
+		rf.state = Follower
+		rf.votedFor = NoneVotedFor
+		rf.currentTerm = args.Term
+	} 
+
+	// 此时 args.Term == rf.currentTerm
+	reply.Term = rf.currentTerm
+
+	if (rf.votedFor == NoneVotedFor || rf.votedFor == args.CandidateId) && 
+		rf.isUpToDate(args.LastLogIndex, args.LastLogTerm) {
+		reply.VoteGranted = true
+		rf.votedFor = args.CandidateId
+		
+		rf.resetSelectTimeout()
+	} else {
+		reply.VoteGranted = false
+	}
+
+	return 
 }
 
 //
