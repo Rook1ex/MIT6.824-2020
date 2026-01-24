@@ -182,6 +182,31 @@ type RequestVoteReply struct {
 	VoteGranted bool // 是否同意给该候选人投票
 }
 
+
+// AppendEntriesArgs 是 Raft 协议中 Leader 向 Follower 发送的 AppendEntries RPC 请求参数结构
+// 主要用于日志复制和心跳检测（心跳时 Entries 为空）
+type AppendEntriesArgs struct {
+	Term         int         // Leader 的当前任期号，用于 Follower 检测 Leader 是否过期
+	LeaderId     int         // Leader 的节点 ID，Follower 可以通过这个 ID 重定向请求
+	
+	PrevLogIndex int         // 新日志条目被追加之前，需要匹配的最后一条日志的索引
+	PrevLogTerm  int         // 新日志条目被追加之前，需要匹配的最后一条日志的任期号
+	// （PrevLogIndex 和 PrevLogTerm 用于日志一致性检查：Follower 必须在该索引和任期上有匹配的日志，
+	//  否则拒绝接收新日志，保证日志的连续性和一致性）
+
+	Entries      []LogEntry  // 需要被复制到 Follower 的日志条目列表（心跳时为空）
+	// 每个 LogEntry 通常包含：索引、任期、具体命令/数据
+
+	LeaderCommit int         // Leader 已经提交的日志条目的最高索引，用于同步 Follower 的提交状态
+}
+
+// AppendEntriesReply 是 Follower 对 Leader 的 AppendEntries RPC 请求的响应结构
+type AppendEntriesReply struct {
+	Term    int    // Follower 的当前任期号，Leader 收到后会更新自己的任期（如果发现更大的任期）
+	Success bool   // true 表示 Follower 成功匹配 PrevLogIndex 和 PrevLogTerm 并追加日志，false 表示匹配失败
+}
+
+
 //
 // example RequestVote RPC handler.
 //
@@ -217,6 +242,29 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	return 
 }
 
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	if args.Term < rf.currentTerm { // 拒绝比当前任期低的请求
+		reply.Success = false
+		reply.Term = rf.currentTerm
+		return 
+	}
+
+	if args.Term > rf.currentTerm { 
+		// 收到比当前任期大的请求，说明选主成功， 转为Follower，更新任期，更新当前任期下未投票
+		rf.currentTerm = args.Term
+		rf.state = Follower
+		rf.votedFor = NoneVotedFor
+	}
+
+	rf.resetSelectTimeout()
+
+	currentLogLen := len(args.Entries)
+	if currentLogLen == 0 { // heartbeat
+		reply.Success = true
+		reply.Term = args.Term
+		return 
+	}
+}
 //
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
