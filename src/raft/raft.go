@@ -17,14 +17,19 @@ package raft
 //   in the same server.
 //
 
-import "sync"
-import "sync/atomic"
-import "../labrpc"
+import (
+	"fmt"
+	"rand"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"../labrpc"
+	"go.starlark.net/repl"
+)
 
 // import "bytes"
 // import "../labgob"
-
-
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -86,7 +91,9 @@ type Raft struct {
 	nextIndex []int  // 对每个follower下一个要发送的日志索引
 	matchIndex []int  // 每个follower已经复制到的最大日志索引
 
-	state ServerState
+	state ServerState  // 当前服务器状态
+
+	lastElectionReset time.Time   // 最近一次收到Leader心跳的时间点
 }
 
 // return log is-up-to-date
@@ -104,8 +111,87 @@ func (rf *Raft) isUpToDate(LastLogIndex int, LastLogTerm int) bool {
 
 // 重置选举时间函数
 func (rf *Raft) resetSelectTimeout() {
-	
+	rf.lastElectionReset = time.Now()
 }
+
+// 发起选举
+func (rf *Raft) startElection() {
+	if !rf.killed() {
+		DPrintf("{Node %v} starts election with RequestVoteRequest %v", rf.me)
+		rf.state = Candidate
+		rf.currentTerm ++
+		rf.votedFor = rf.me
+
+		voteCount := 0 // 记录所得票数
+
+		// 构建请求投票RPC参数
+		currentLastLogIndex := len(rf.log) - 1
+		args := RequestVoteArgs{
+			Term: rf.currentTerm,
+			CandidateId: rf.me,
+			LastLogIndex: currentLastLogIndex,
+			LastLogTerm: rf.log[currentLastLogIndex].Term,
+		}
+
+		// 并行发送投票请求
+		for peer := range rf.peers {
+			if peer == rf.me {
+				continue
+			}
+
+			go func(peer int) {
+				reply := RequestVoteReply{}
+
+				ok := rf.sendRequestVote(peer, &args, &reply)
+
+				if ok {
+					rf.mu.Lock()
+					defer rf.mu.Unlock()
+
+					if reply.Term < rf.currentTerm { // 拒绝比旧任期的回复
+						return
+					} else if reply.Term > rf.currentTerm { // 收到比当前任期大的回复，其他节点选举成功
+						rf.state = Follower
+						rf.currentTerm, rf.votedFor = reply.Term, NoneVotedFor
+					} else if reply.Term == rf.currentTerm && rf.state == Candidate && reply.VoteGranted {
+						voteCount ++
+						
+						if voteCount > len(rf.peers) / 2 {
+							rf.state = Leader
+							DPrintf("{Node %v} receives majority votes in term %v", rf.me, rf.currentTerm)
+							// TODO 这里需要发送心跳告知其他节点
+						}
+					}
+				}
+			} (peer)
+		}
+	}
+}
+
+// 定时器检测是否超时
+func (rf *Raft) electionTicker()  {
+	for !rf.killed() {
+		// 设定随机选举超时时间
+		timeout := time.Duration(300+rand.Intn(300)) * time.Millisecond
+		// 每10ms 醒来一次检查是否超过随机选举时间
+		time.Sleep(10 * time.Millisecond)
+
+		rf.mu.Lock()
+
+		if rf.state == Leader {
+			rf.mu.Unlock()
+			continue
+		}
+
+		if time.Since(rf.lastElectionReset) > timeout {
+			rf.mu.Unlock()
+			rf.startElection()
+		} else {
+			rf.mu.Unlock()
+		}
+	}
+}
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -212,6 +298,8 @@ type AppendEntriesReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+
+	// 检查这里逻辑是不是和发起选举重复
 	rf.mu.Lock()
 	defer rf.mu.Unlock() 
 	if rf.currentTerm > args.Term {
@@ -243,6 +331,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm { // 拒绝比当前任期低的请求
 		reply.Success = false
 		reply.Term = rf.currentTerm
