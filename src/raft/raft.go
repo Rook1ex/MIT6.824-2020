@@ -97,7 +97,6 @@ type Raft struct {
 }
 
 // return log is-up-to-date
-
 func (rf *Raft) isUpToDate(LastLogIndex int, LastLogTerm int) bool {
 	currentlastlogindex := len(rf.log) - 1
 	currentlastlogterm := rf.log[currentlastlogindex].Term
@@ -111,60 +110,108 @@ func (rf *Raft) isUpToDate(LastLogIndex int, LastLogTerm int) bool {
 
 // 重置选举时间函数
 func (rf *Raft) resetSelectTimeout() {
+	// 该函数无锁保护，注意使用时的并发安全性
 	rf.lastElectionReset = time.Now()
+}
+
+func (rf *Raft) boardcastHeartbeat() {
+	rf.mu.Lock()
+
+	if rf.state != Leader {
+		rf.mu.Unlock()
+		return 
+	}
+
+	startedTerm := rf.currentTerm // 这里的保存任期快照，避免选主过程中Term的改变导致错乱
+
+	rf.mu.Unlock()
+
+	for peer := range rf.peers {
+		if peer == rf.me {
+			continue
+		}
+
+		args := AppendEntriesArgs {
+			Term: startedTerm,
+			LeaderId: rf.me,
+			Entries: nil,
+		}
+
+		go func (peer int)  {
+			reply := AppendEntriesReply{}
+			if rf.sendAppendEntries(peer, &args, &reply) {
+				rf.mu.Lock()
+				if reply.Term > rf.currentTerm { // 接收到比自己大的任期，其他服务器选主成功，退为Follower
+					rf.currentTerm = reply.Term
+					rf.state = Follower
+					rf.votedFor = NoneVotedFor
+				}
+				rf.mu.Unlock()
+			}
+		}(peer)
+	}
 }
 
 // 发起选举
 func (rf *Raft) startElection() {
-	if !rf.killed() {
-		DPrintf("{Node %v} starts election with RequestVoteRequest %v", rf.me)
-		rf.state = Candidate
-		rf.currentTerm ++
-		rf.votedFor = rf.me
+	rf.mu.Lock()
+	
+	if rf.killed() {
+		rf.mu.Unlock()
+		return
+	}
+	
+	DPrintf("{Node %v} starts election with RequestVoteRequest %v", rf.me)
+	rf.state = Candidate
+	rf.currentTerm ++
+	termStarted := rf.currentTerm
+	rf.votedFor = rf.me
+	voteCount := 1 // 记录所得票数
+	currentLastLogIndex := len(rf.log) - 1
+	currentLastLogTerm := rf.log[currentLastLogIndex].Term
 
-		voteCount := 0 // 记录所得票数
+	rf.resetSelectTimeout()
+	rf.mu.Unlock() // 未解锁会造成死锁
+	// 并行发送投票请求
+	for peer := range rf.peers {
+		if peer == rf.me {
+			continue
+		}
 
 		// 构建请求投票RPC参数
-		currentLastLogIndex := len(rf.log) - 1
-		args := RequestVoteArgs{
-			Term: rf.currentTerm,
+		args := RequestVoteArgs{ // something wrong
+			Term: termStarted,
 			CandidateId: rf.me,
 			LastLogIndex: currentLastLogIndex,
-			LastLogTerm: rf.log[currentLastLogIndex].Term,
+			LastLogTerm: currentLastLogTerm,
 		}
+		
+		go func(peer int) {
+			reply := RequestVoteReply{}
 
-		// 并行发送投票请求
-		for peer := range rf.peers {
-			if peer == rf.me {
-				continue
-			}
+			ok := rf.sendRequestVote(peer, &args, &reply)
 
-			go func(peer int) {
-				reply := RequestVoteReply{}
+			if ok {
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
 
-				ok := rf.sendRequestVote(peer, &args, &reply)
-
-				if ok {
-					rf.mu.Lock()
-					defer rf.mu.Unlock()
-
-					if reply.Term < rf.currentTerm { // 拒绝比旧任期的回复
-						return
-					} else if reply.Term > rf.currentTerm { // 收到比当前任期大的回复，其他节点选举成功
-						rf.state = Follower
-						rf.currentTerm, rf.votedFor = reply.Term, NoneVotedFor
-					} else if reply.Term == rf.currentTerm && rf.state == Candidate && reply.VoteGranted {
-						voteCount ++
-						
-						if voteCount > len(rf.peers) / 2 {
-							rf.state = Leader
-							DPrintf("{Node %v} receives majority votes in term %v", rf.me, rf.currentTerm)
-							// TODO 这里需要发送心跳告知其他节点
-						}
+				if reply.Term < rf.currentTerm { // 拒绝比旧任期的回复
+					return
+				} else if reply.Term > rf.currentTerm { // 收到比当前任期大的回复，其他节点选举成功
+					rf.state = Follower
+					rf.currentTerm, rf.votedFor = reply.Term, NoneVotedFor
+				} else if reply.Term == rf.currentTerm && rf.state == Candidate && reply.VoteGranted {
+					voteCount ++
+					
+					if voteCount > len(rf.peers) / 2 {
+						rf.state = Leader
+						DPrintf("{Node %v} receives majority votes in term %v", rf.me, rf.currentTerm)
+						// 发送心跳告知其他节点
+						rf.boardcastHeartbeat()
 					}
 				}
-			} (peer)
-		}
+			}
+		} (peer)
 	}
 }
 
@@ -340,7 +387,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	if args.Term > rf.currentTerm { 
-		// 收到比当前任期大的请求，说明选主成功， 转为Follower，更新任期，更新当前任期下未投票
+		// 收到比当前任期大的请求，说明其他服务器选主成功， 转为Follower，更新任期，更新当前任期下未投票
 		rf.currentTerm = args.Term
 		rf.state = Follower
 		rf.votedFor = NoneVotedFor
@@ -349,7 +396,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.resetSelectTimeout()
 
 	currentLogLen := len(args.Entries)
-	if currentLogLen == 0 { // heartbeat
+	if currentLogLen == 0 { // 日志为空则代表是心跳heartbeat
 		reply.Success = true
 		reply.Term = args.Term
 		return 
@@ -389,7 +436,10 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
