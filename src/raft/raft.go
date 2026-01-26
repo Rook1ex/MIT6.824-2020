@@ -18,14 +18,12 @@ package raft
 //
 
 import (
-	"fmt"
-	"rand"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
-
 	"../labrpc"
-	"go.starlark.net/repl"
+	//"go.starlark.net/repl"
 )
 
 // import "bytes"
@@ -80,7 +78,7 @@ type Raft struct {
 
 	// persist state
 	currentTerm int  // 服务器见过最大的任期号
-	votedFor int  // 在currentTerm中投给了谁
+	votedFor int  // 在currentTerm的任期中投给了谁
 	log []LogEntry  // 日志
 
 	// volatile state
@@ -161,7 +159,7 @@ func (rf *Raft) startElection() {
 		return
 	}
 	
-	DPrintf("{Node %v} starts election with RequestVoteRequest %v", rf.me)
+	DPrintf("{Node %v} starts election", rf.me)
 	rf.state = Candidate
 	rf.currentTerm ++
 	termStarted := rf.currentTerm
@@ -231,8 +229,8 @@ func (rf *Raft) electionTicker()  {
 		}
 
 		if time.Since(rf.lastElectionReset) > timeout {
-			rf.mu.Unlock()
 			rf.startElection()
+			rf.mu.Unlock()
 		} else {
 			rf.mu.Unlock()
 		}
@@ -505,7 +503,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.state = Follower
+	rf.votedFor = NoneVotedFor
+	rf.lastElectionReset = time.Now()
+	rf.log = make([]LogEntry, 1)
+	rf.log[0].Command = nil
+	rf.log[0].Term = -1
 
+	go rf.electionTicker()  // 开个gorountine起定时选举任务
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
