@@ -139,6 +139,9 @@ func (rf *Raft) boardcastHeartbeat() {
 			reply := AppendEntriesReply{}
 			if rf.sendAppendEntries(peer, &args, &reply) {
 				rf.mu.Lock()
+				DPrintf("Node %v receive reply: %v from Node: %v after sendAppendEntries: %v, in term: %v", 
+						rf.me, reply, peer, args, rf.currentTerm)
+
 				if reply.Term > rf.currentTerm { // 接收到比自己大的任期，其他服务器选主成功，退为Follower
 					rf.currentTerm = reply.Term
 					rf.state = Follower
@@ -153,12 +156,12 @@ func (rf *Raft) boardcastHeartbeat() {
 // 发起选举
 func (rf *Raft) startElection() {
 	rf.mu.Lock()
-	
+
 	if rf.killed() {
 		rf.mu.Unlock()
 		return
 	}
-	
+
 	DPrintf("{Node %v} starts election", rf.me)
 	rf.state = Candidate
 	rf.currentTerm ++
@@ -193,6 +196,8 @@ func (rf *Raft) startElection() {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
 
+				DPrintf("{Node %v} receives RequestVoteResponse %v from {Node %v} after sending RequestVoteRequest %v in term %v", 
+						rf.me, reply, peer, args, rf.currentTerm)
 				if reply.Term < rf.currentTerm { // 拒绝比旧任期的回复
 					return
 				} else if reply.Term > rf.currentTerm { // 收到比当前任期大的回复，其他节点选举成功
@@ -200,7 +205,7 @@ func (rf *Raft) startElection() {
 					rf.currentTerm, rf.votedFor = reply.Term, NoneVotedFor
 				} else if reply.Term == rf.currentTerm && rf.state == Candidate && reply.VoteGranted {
 					voteCount ++
-					
+
 					if voteCount > len(rf.peers) / 2 {
 						rf.state = Leader
 						DPrintf("{Node %v} receives majority votes in term %v", rf.me, rf.currentTerm)
@@ -215,24 +220,20 @@ func (rf *Raft) startElection() {
 
 // 定时器检测是否超时
 func (rf *Raft) electionTicker()  {
+	DPrintf("killed ? %v", rf.killed())
 	for !rf.killed() {
 		// 设定随机选举超时时间
 		timeout := time.Duration(300+rand.Intn(300)) * time.Millisecond
 		// 每10ms 醒来一次检查是否超过随机选举时间
 		time.Sleep(10 * time.Millisecond)
 
-		rf.mu.Lock()
-
 		if rf.state == Leader {
-			rf.mu.Unlock()
 			continue
 		}
 
 		if time.Since(rf.lastElectionReset) > timeout {
+			DPrintf("Node: %v start Elecetion in Term: %v, Time: %v", rf.me, rf.currentTerm, time.Now())
 			rf.startElection()
-			rf.mu.Unlock()
-		} else {
-			rf.mu.Unlock()
 		}
 	}
 }
@@ -507,13 +508,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = NoneVotedFor
 	rf.lastElectionReset = time.Now()
 	rf.log = make([]LogEntry, 1)
-	rf.log[0].Command = nil
-	rf.log[0].Term = -1
+	rf.currentTerm = 0
 
-	go rf.electionTicker()  // 开个gorountine起定时选举任务
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
+	go rf.electionTicker()  // 开个gorountine起定时选举任务
 
 	return rf
 }
